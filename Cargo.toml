@@ -1,3 +1,9 @@
+[workspace]
+# `lean-checker` (this package) is the workspace root; `sokonanoda` is an
+# imported member (a Lean 4 type checker / kernel with NbE, imported with full
+# history via `git subtree`).
+members = ["sokonanoda"]
+
 [package]
 name = "lean-checker"
 version = "0.1.0"
