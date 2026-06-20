@@ -418,6 +418,15 @@ pub fn check_environment(env: Obj, selected: &[String], num_threads: usize) -> C
     let config = Config { num_threads, ..Config::default() };
     let mut builder = Builder::new(config);
 
+    // A spinner while we walk the lean_objects and build the kernel DAG (this
+    // can take a while for a large environment). Auto-hidden when not a TTY.
+    let spinner = indicatif::ProgressBar::new_spinner();
+    spinner.set_style(
+        indicatif::ProgressStyle::with_template("{spinner:.green} {msg} ({pos} declarations)").unwrap(),
+    );
+    spinner.set_message("building kernel DAG");
+    spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+
     let (total, names) = unsafe {
         let mut metas = gather_consts(env);
         let units = assign_units(&mut metas);
@@ -430,10 +439,12 @@ pub fn check_environment(env: Obj, selected: &[String], num_threads: usize) -> C
             } else {
                 emit_singleton(&mut w, &metas[unit.members[0]]);
             }
+            spinner.inc(unit.members.len() as u64);
         }
         let total = order.iter().map(|&u| units[u].members.len()).sum();
         (total, std::mem::take(&mut w.names))
     };
+    spinner.finish_and_clear();
 
     let export = builder.finish();
     let failures = check_all(&export, &names, num_threads.max(1));
