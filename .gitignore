@@ -1,0 +1,20 @@
+# Nix / direnv
+.direnv/
+result
+result-*
+
+# Rust
+/target/
+
+# Lean / Lake
+/.lake/
+/build/
+
+# jetbains
+.idea
+
+# claude
+.claude
+
+# Added by cargo
+/target

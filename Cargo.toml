@@ -1,0 +1,16 @@
+[package]
+name = "lean-checker"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+
+[dependencies]
+# Clap-compatible, modernized argument parser.
+palc = "0.0.2"
+# Structured logging.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# Raw FFI bindings to the Lean 4 runtime. We link the *shared* `libleanshared`
+# rather than the static libraries (the `static` default feature), which is what
+# the Nix `lean4` package ships.
+lean-sys = { version = "0.0.9", default-features = false }
