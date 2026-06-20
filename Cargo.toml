@@ -26,6 +26,9 @@ sokonanoda = { path = "sokonanoda" }
 num-bigint = "0.4"
 rayon = "1.12.0"
 indicatif = { version = "0.18.4", features = ["rayon"] }
+# Grow the stack on demand in the recursive FFI tree walkers, instead of
+# pre-reserving a fixed oversized stack.
+stacker = "0.1"
 
 [build-dependencies]
 cc = "1.2.65"

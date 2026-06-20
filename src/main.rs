@@ -14,9 +14,6 @@ use tracing_subscriber::EnvFilter;
 
 use crate::ffi::Runtime;
 
-/// 1 GiB worker stack: the FFI walkers recurse deeply over the imported terms.
-const STACK_SIZE: usize = 1 << 30;
-
 /// Import Lean modules and type-check their declarations with the kernel.
 #[derive(Parser, Debug)]
 #[command(name = "lean-checker")]
@@ -50,17 +47,10 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Run everything on one large-stack thread: the Lean runtime must be driven
-    // from a single thread, and the FFI walkers recurse far past the default
-    // 8 MiB stack.
-    let ok = std::thread::Builder::new()
-        .stack_size(STACK_SIZE)
-        .spawn(move || run(cli))
-        .expect("spawn worker thread")
-        .join()
-        .unwrap_or_else(|_| Err("worker thread panicked".to_string()));
-
-    match ok {
+    // The Lean runtime is driven from this single (main) thread; the FFI walkers
+    // recurse far past the default 8 MiB stack, but they grow the stack on demand
+    // via `stacker` rather than relying on an oversized pre-reserved one.
+    match run(cli) {
         Ok(true) => {}
         Ok(false) => std::process::exit(1), // checking found errors
         Err(err) => {

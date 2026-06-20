@@ -166,6 +166,14 @@ unsafe fn nat_to_u64(o: &LeanObj) -> u64 {
 
 // --- tree walkers ----------------------------------------------------------
 
+/// Recursion over the imported `Expr`/`Level` trees can nest far deeper than the
+/// default 8 MiB stack (long application spines, deeply nested binders). Rather
+/// than pre-reserve a fixed oversized stack, the walkers call
+/// [`stacker::maybe_grow`] at each level: keep at least `RED_ZONE` bytes free,
+/// and allocate a fresh `STACK_GROWTH`-sized segment when running low.
+const RED_ZONE: usize = 256 * 1024;
+const STACK_GROWTH: usize = 8 * 1024 * 1024;
+
 /// Walks `lean_object` trees into a sokonanoda [`Builder`], memoizing shared
 /// expression nodes (Lean hash-conses, so the same pointer recurs often).
 struct Walker<'b, 'p> {
@@ -205,30 +213,32 @@ impl<'b, 'p> Walker<'b, 'p> {
     /// `Level`: zero = scalar; succ=1, max=2, imax=3, param=4, mvar=5.
     unsafe fn walk_level(&mut self, o: &LeanObj) -> LevelPtr<'p> {
         unsafe {
-            if o.is_scalar() {
-                return self.b.level_zero();
-            }
-            match o.tag() {
-                1 => {
-                    let l = self.walk_level(&o.child(0));
-                    self.b.level_succ(l)
+            stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || {
+                if o.is_scalar() {
+                    return self.b.level_zero();
                 }
-                2 => {
-                    let l = self.walk_level(&o.child(0));
-                    let r = self.walk_level(&o.child(1));
-                    self.b.level_max(l, r)
+                match o.tag() {
+                    1 => {
+                        let l = self.walk_level(&o.child(0));
+                        self.b.level_succ(l)
+                    }
+                    2 => {
+                        let l = self.walk_level(&o.child(0));
+                        let r = self.walk_level(&o.child(1));
+                        self.b.level_max(l, r)
+                    }
+                    3 => {
+                        let l = self.walk_level(&o.child(0));
+                        let r = self.walk_level(&o.child(1));
+                        self.b.level_imax(l, r)
+                    }
+                    4 => {
+                        let n = self.walk_name(&o.child(0));
+                        self.b.level_param(n)
+                    }
+                    t => panic!("unexpected Level tag {t} (uninstantiated universe metavariable?)"),
                 }
-                3 => {
-                    let l = self.walk_level(&o.child(0));
-                    let r = self.walk_level(&o.child(1));
-                    self.b.level_imax(l, r)
-                }
-                4 => {
-                    let n = self.walk_name(&o.child(0));
-                    self.b.level_param(n)
-                }
-                t => panic!("unexpected Level tag {t} (uninstantiated universe metavariable?)"),
-            }
+            })
         }
     }
 
@@ -255,7 +265,7 @@ impl<'b, 'p> Walker<'b, 'p> {
             if let Some(&e) = self.expr_memo.get(&key) {
                 return e;
             }
-            let e = self.walk_expr_uncached(o);
+            let e = stacker::maybe_grow(RED_ZONE, STACK_GROWTH, || self.walk_expr_uncached(o));
             self.expr_memo.insert(key, e);
             e
         }
