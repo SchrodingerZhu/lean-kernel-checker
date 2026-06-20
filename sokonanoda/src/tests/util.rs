@@ -1,55 +1,39 @@
+use crate::builder::Builder;
 use crate::util::{Config, CowStr, ExportFile, ExprPtr, LevelPtr, TcCtx};
 use rand::distributions::Alphanumeric;
 use rand::{rngs::ThreadRng, Rng};
 use std::error::Error;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub(crate) fn test_export_file<A>(
-    config_path: Option<&Path>,
-    f: impl FnOnce(&ExportFile) -> A,
-) -> Result<A, Box<dyn Error>> {
-    let (export_file, _) = test_get_export_file(config_path)?;
-    Ok(f(&export_file))
-}
-
-pub(crate) fn test_get_export_file<'p>(config_path: Option<&Path>) -> Result<(ExportFile<'p>, Vec<String>), Box<dyn Error>> {
-    let config_file = match config_path {
-        None => Config {
-            export_file_path: Some(PathBuf::from("test_resources/Empty/export")),
-            use_stdin: false,
-            permitted_axioms: Some(Vec::new()),
-            unpermitted_axiom_hard_error: true,
-            nat_extension: false,
-            string_extension: false,
-            pp_declars: None,
-            pp_options: crate::pretty_printer::PpOptions::default(),
-            unknown_pp_declar_hard_error: true,
-            pp_output_path: None,
-            pp_to_stdout: false,
-            num_threads: 1,
-            print_success_message: true,
-            print_axioms: true,
-            unsafe_permit_all_axioms: false
-        },
-        Some(config_path) => Config::try_from(config_path)?,
-    };
-    config_file.to_export_file()
-}
-
-#[allow(dead_code)]
-pub(crate) fn test_export_file_should_panic<A>(config_path: Option<&Path>, f: impl FnOnce(&ExportFile) -> A) {
-    // If there's an IO issue with actually getting the export file, we don't want
-    // `should_panic` test to succeed, so we actually want to return success in this case.
-    match test_get_export_file(config_path) {
-        Err(..) => {}
-        Ok((export_file, _)) => {
-            f(&export_file);
-        }
+/// The config the test harness checks against. Equivalent to the old
+/// `test_resources/Empty/export` run: an empty environment with the kernel
+/// literal extensions disabled.
+fn test_config() -> Config {
+    Config {
+        nat_extension: false,
+        string_extension: false,
+        print_success_message: true,
+        print_axioms: true,
+        ..Config::default()
     }
 }
 
-pub(crate) fn test_ctx<'p, A>(path: Option<&Path>, f: impl FnOnce(&mut TcCtx) -> A) -> Result<A, Box<dyn Error>> {
-    test_export_file(path, |export_file| export_file.with_ctx(|ctx, _arena| f(ctx)))
+/// An empty environment, built via [`Builder`] instead of parsing an export
+/// file. Equivalent to what the parser produced from an empty export file.
+pub(crate) fn empty_export_file<'p>() -> ExportFile<'p> { Builder::new(test_config()).finish() }
+
+/// `_path` is retained for source compatibility with existing call sites (which
+/// all pass `None`); only the empty environment is supported now that the
+/// export-file parser has been removed.
+pub(crate) fn test_export_file<A>(
+    _path: Option<&Path>,
+    f: impl FnOnce(&ExportFile) -> A,
+) -> Result<A, Box<dyn Error>> {
+    Ok(f(&empty_export_file()))
+}
+
+pub(crate) fn test_ctx<'p, A>(_path: Option<&Path>, f: impl FnOnce(&mut TcCtx) -> A) -> Result<A, Box<dyn Error>> {
+    test_export_file(None, |export_file| export_file.with_ctx(|ctx, _arena| f(ctx)))
 }
 
 impl<'t, 'p: 't> TcCtx<'t, 'p> {
@@ -88,18 +72,10 @@ fn check_empty() -> Result<(), Box<dyn Error>> {
     })
 }
 
-#[test]
-#[should_panic(expected = "infer_proj prop")]
-fn check_proj_from_prop() {
-    test_export_file_should_panic(
-        Some(Path::new("test_resources/ProjFromProp/config.json")),
-        |export| {
-            for declar in export.declars.values() {
-                export.check_declar(declar);
-            }
-        },
-    )
-}
+// `check_proj_from_prop` was removed with the export-file parser: it loaded a
+// real export fixture (`test_resources/ProjFromProp`) to assert the kernel
+// rejects projecting out of a `Prop`. It should be reinstated as a `Builder`-
+// constructed fixture (or driven through the outer FFI crate) in a later pass.
 
 pub(crate) fn rand_string<'t>(rng: &mut ThreadRng, size: usize) -> CowStr<'t> {
     let rand_string: String = rng.sample_iter(&Alphanumeric).take(size).map(char::from).collect();

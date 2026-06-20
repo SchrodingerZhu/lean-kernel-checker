@@ -5,7 +5,6 @@ use crate::expr::{
 };
 use crate::level::{Level, IMAX_HASH, MAX_HASH, PARAM_HASH, SUCC_HASH};
 use crate::name::{Name, NUM_HASH, STR_HASH};
-use crate::parser::parse_export_file;
 use crate::pretty_printer::{PpOptions, PrettyPrinter};
 use crate::tc::TypeChecker;
 use crate::union_find::UnionFind;
@@ -62,6 +61,7 @@ impl<'a> ExprIndexSet<'a> {
         self.map.get_index_of(value)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize { self.map.len() }
 
     pub(crate) fn entry(&mut self, value: Expr<'a>) -> IndexMapEntry<'_, Expr<'a>, ()> { self.map.entry(value) }
@@ -1066,6 +1066,32 @@ pub struct Config {
     pub unsafe_permit_all_axioms: bool,
 }
 
+impl Default for Config {
+    /// Sensible defaults for programmatic checking (single-threaded, with the
+    /// `Nat`/`String` literal kernel extensions enabled). Tweak `num_threads`
+    /// and the extension flags as needed before handing the config to a
+    /// [`crate::builder::Builder`].
+    fn default() -> Self {
+        Config {
+            export_file_path: None,
+            use_stdin: false,
+            permitted_axioms: None,
+            unpermitted_axiom_hard_error: true,
+            num_threads: 1,
+            nat_extension: true,
+            string_extension: true,
+            pp_declars: None,
+            unknown_pp_declar_hard_error: true,
+            pp_options: PpOptions::default(),
+            pp_output_path: None,
+            pp_to_stdout: false,
+            print_success_message: false,
+            print_axioms: false,
+            unsafe_permit_all_axioms: false,
+        }
+    }
+}
+
 impl TryFrom<&Path> for Config {
     type Error = Box<dyn Error>;
     fn try_from(p: &Path) -> Result<Config, Self::Error> {
@@ -1134,21 +1160,6 @@ impl Config {
         }
     }
 
-    // Returns the export file, and a list of strings representing the names of "skipped" axioms
-    // (axioms which were in the export file, but not allowed by the execution config).
-    pub fn to_export_file<'a>(self) -> Result<(ExportFile<'a>, Vec<String>), Box<dyn Error>> {
-        if let Some(pathbuf) = self.export_file_path.as_ref() {
-            match OpenOptions::new().read(true).truncate(false).open(pathbuf) {
-                Ok(file) => parse_export_file(BufReader::new(file), self),
-                Err(e) => Err(Box::from(format!("Failed to open export file: {:?}", e))),
-            }
-        } else if self.use_stdin {
-            let reader = BufReader::new(std::io::stdin());
-            parse_export_file(reader, self)
-        } else {
-            panic!("Configuration file must specify en export file path or \"use_stdin\": true")
-        }
-    }
 }
 
 // The intent is to use this for reporting exit status/error info

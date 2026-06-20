@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 #![deny(clippy::cast_possible_truncation)]
 
+pub mod builder;
 pub mod conv;
 pub mod debug_printer;
 pub mod env;
@@ -13,7 +14,6 @@ pub mod expr;
 pub mod inductive;
 pub mod level;
 pub mod name;
-pub mod parser;
 pub mod pretty_printer;
 pub mod quot;
 pub mod tc;
