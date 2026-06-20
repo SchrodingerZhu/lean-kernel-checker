@@ -20,3 +20,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # rather than the static libraries (the `static` default feature), which is what
 # the Nix `lean4` package ships.
 lean-sys = { version = "0.0.9", default-features = false }
+# The kernel/type-checker we feed via FFI.
+sokonanoda = { path = "sokonanoda" }
+# Arbitrary-precision Nat literals (matches sokonanoda's num-bigint).
+num-bigint = "0.4"
+
+[build-dependencies]
+cc = "1.2.65"

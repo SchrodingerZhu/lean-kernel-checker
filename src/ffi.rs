@@ -17,12 +17,73 @@
 use std::ffi::CString;
 
 use lean_sys::{
-    lean_array_get_core, lean_array_push, lean_array_size, lean_dec, lean_inc,
-    lean_init_task_manager, lean_initialize, lean_initialize_runtime_module,
-    lean_io_error_to_string, lean_io_mark_end_initialization, lean_io_result_get_error,
-    lean_io_result_is_ok, lean_io_result_take_value, lean_mk_empty_array, lean_mk_string,
-    lean_object, lean_string_cstr, lean_string_size,
+    lean_array_get_core, lean_array_push, lean_array_size, lean_ctor_get, lean_ctor_get_uint8,
+    lean_ctor_num_objs, lean_dec, lean_inc, lean_init_task_manager, lean_initialize,
+    lean_initialize_runtime_module, lean_io_error_to_string, lean_io_mark_end_initialization,
+    lean_io_result_get_error, lean_io_result_is_ok, lean_io_result_take_value, lean_is_scalar,
+    lean_mk_empty_array, lean_mk_string, lean_object, lean_ptr_tag, lean_string_cstr,
+    lean_string_size, lean_unbox,
 };
+
+/// An owned reference to a Lean heap object: `Drop` decrements its refcount and
+/// `Clone` increments it. This lets the FFI extraction layer manage Lean
+/// refcounts via RAII (rather than leaking), so the process can check repeatedly
+/// — e.g. as a long-lived language server — without unbounded growth.
+pub struct LeanObj(*mut lean_object);
+
+impl LeanObj {
+    /// Take ownership of an already-owned reference (no refcount change).
+    ///
+    /// # Safety
+    /// `o` must carry a reference that this `LeanObj` is now responsible for.
+    pub unsafe fn from_owned(o: *mut lean_object) -> Self { LeanObj(o) }
+
+    /// Acquire a fresh reference to a borrowed object (increments).
+    ///
+    /// # Safety
+    /// `o` must be a live Lean object.
+    pub unsafe fn from_borrowed(o: *mut lean_object) -> Self {
+        unsafe { lean_inc(o) };
+        LeanObj(o)
+    }
+
+    pub fn as_ptr(&self) -> *mut lean_object { self.0 }
+
+    /// Whether this is an unboxed scalar (e.g. `Nat.zero`, `Name.anonymous`).
+    pub fn is_scalar(&self) -> bool { lean_is_scalar(self.0) }
+
+    /// # Safety: `self` must be a constructor object.
+    pub unsafe fn tag(&self) -> u8 { unsafe { lean_ptr_tag(self.0) } }
+
+    /// # Safety: `self` must be a constructor object.
+    pub unsafe fn num_objs(&self) -> u32 { unsafe { lean_ctor_num_objs(self.0) } }
+
+    /// # Safety: `self` must be an unboxed scalar.
+    pub unsafe fn unbox(&self) -> usize { lean_unbox(self.0) }
+
+    /// The `i`-th object field, as a new owned reference.
+    ///
+    /// # Safety: `self` must be a constructor with more than `i` object fields.
+    pub unsafe fn child(&self, i: u32) -> LeanObj { unsafe { LeanObj::from_borrowed(lean_ctor_get(self.0, i)) } }
+
+    /// A scalar byte at `offset` (bytes) past the object fields.
+    ///
+    /// # Safety: `offset` must lie within `self`'s scalar region.
+    pub unsafe fn ctor_u8(&self, offset: u32) -> u8 { unsafe { lean_ctor_get_uint8(self.0, offset) } }
+}
+
+impl Clone for LeanObj {
+    fn clone(&self) -> Self {
+        unsafe { lean_inc(self.0) };
+        LeanObj(self.0)
+    }
+}
+
+impl Drop for LeanObj {
+    fn drop(&mut self) {
+        unsafe { lean_dec(self.0) };
+    }
+}
 
 // Functions exported from `glue/Glue.lean`, plus the module initializer that
 // Lean generates for it (which transitively initializes `Init` and `Lean`).
@@ -92,6 +153,9 @@ pub struct Environment {
 }
 
 impl Environment {
+    /// The raw Lean `Environment` object, for the FFI extraction layer to walk.
+    pub fn raw(&self) -> *mut lean_object { self.handle }
+
     /// Module names of the environment's direct imports.
     pub fn imports(&self) -> Vec<String> {
         unsafe { read_string_array(lc_env_imports(self.borrow())) }
