@@ -17,12 +17,11 @@
 use std::ffi::CString;
 
 use lean_sys::{
-    lean_array_get_core, lean_array_push, lean_array_size, lean_ctor_get, lean_ctor_get_uint8,
-    lean_ctor_num_objs, lean_dec, lean_inc, lean_init_task_manager, lean_initialize,
-    lean_initialize_runtime_module, lean_io_error_to_string, lean_io_mark_end_initialization,
-    lean_io_result_get_error, lean_io_result_is_ok, lean_io_result_take_value, lean_is_scalar,
-    lean_mk_empty_array, lean_mk_string, lean_object, lean_ptr_tag, lean_string_cstr,
-    lean_string_size, lean_unbox,
+    lean_array_push, lean_ctor_get, lean_ctor_get_uint8, lean_ctor_num_objs, lean_dec, lean_inc,
+    lean_init_task_manager, lean_initialize, lean_initialize_runtime_module, lean_io_error_to_string,
+    lean_io_mark_end_initialization, lean_io_result_get_error, lean_io_result_is_ok,
+    lean_io_result_take_value, lean_is_scalar, lean_mk_empty_array, lean_mk_string, lean_object,
+    lean_ptr_tag, lean_string_cstr, lean_string_size, lean_unbox,
 };
 
 /// An owned reference to a Lean heap object: `Drop` decrements its refcount and
@@ -91,9 +90,6 @@ unsafe extern "C" {
     fn initialize_Glue(builtin: u8) -> *mut lean_object;
     fn lc_init_search_path(extra: *mut lean_object) -> *mut lean_object;
     fn lc_import_modules(mods: *mut lean_object) -> *mut lean_object;
-    fn lc_env_imports(env: *mut lean_object) -> *mut lean_object;
-    fn lc_env_const_names(env: *mut lean_object) -> *mut lean_object;
-    fn lc_env_const_kinds(env: *mut lean_object) -> *mut lean_object;
 }
 
 /// Witness that the Lean runtime has been initialized. Construct exactly once,
@@ -155,27 +151,6 @@ pub struct Environment {
 impl Environment {
     /// The raw Lean `Environment` object, for the FFI extraction layer to walk.
     pub fn raw(&self) -> *mut lean_object { self.handle }
-
-    /// Module names of the environment's direct imports.
-    pub fn imports(&self) -> Vec<String> {
-        unsafe { read_string_array(lc_env_imports(self.borrow())) }
-    }
-
-    /// Non-internal constants as `(name, kind)` pairs, in environment order.
-    pub fn constants(&self) -> Vec<(String, String)> {
-        unsafe {
-            let names = read_string_array(lc_env_const_names(self.borrow()));
-            let kinds = read_string_array(lc_env_const_kinds(self.borrow()));
-            names.into_iter().zip(kinds).collect()
-        }
-    }
-
-    /// Hand out an owned reference for a single consuming glue call, keeping our
-    /// own reference intact.
-    unsafe fn borrow(&self) -> *mut lean_object {
-        unsafe { lean_inc(self.handle) };
-        self.handle
-    }
 }
 
 impl Drop for Environment {
@@ -196,20 +171,6 @@ unsafe fn mk_string_array(items: &[String]) -> *mut lean_object {
             arr = lean_array_push(arr, ls);
         }
         arr
-    }
-}
-
-/// Read (and consume) a Lean `Array String` into a `Vec<String>`.
-unsafe fn read_string_array(arr: *mut lean_object) -> Vec<String> {
-    unsafe {
-        let n = lean_array_size(arr);
-        let mut out = Vec::with_capacity(n);
-        for i in 0..n {
-            // Borrowed element; do not decrement it.
-            out.push(read_lean_string(lean_array_get_core(arr, i)));
-        }
-        lean_dec(arr);
-        out
     }
 }
 

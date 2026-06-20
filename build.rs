@@ -41,6 +41,12 @@ fn main() {
     let mut build = cc::Build::new();
     build.file(&glue_c).file(&nat_c);
     apply_flags(&mut build, &leanc_flags("--print-cflags"));
+    // Thin LTO when optimizing and the compiler supports it (no benefit in
+    // unoptimized debug builds, where it would only slow compilation).
+    let optimizing = std::env::var("OPT_LEVEL").map(|o| o != "0").unwrap_or(false);
+    if optimizing {
+        build.flag_if_supported("-flto=thin");
+    }
     build.compile("lcglue");
 
     // 3. Link the GMP library that `leanc` links, so `nat_bytes.c`'s `__gmpz_*`

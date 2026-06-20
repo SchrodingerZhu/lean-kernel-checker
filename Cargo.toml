@@ -24,6 +24,13 @@ lean-sys = { version = "0.0.9", default-features = false }
 sokonanoda = { path = "sokonanoda" }
 # Arbitrary-precision Nat literals (matches sokonanoda's num-bigint).
 num-bigint = "0.4"
+rayon = "1.12.0"
+indicatif = { version = "0.18.4", features = ["rayon"] }
 
 [build-dependencies]
 cc = "1.2.65"
+
+# Workspace-wide release profile (profiles are honoured only at the root).
+# Thin LTO complements the `-flto=thin` applied to the C glue in build.rs.
+[profile.release]
+lto = "thin"

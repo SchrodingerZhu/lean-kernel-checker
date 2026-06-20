@@ -33,40 +33,6 @@ def lcImportModules (mods : Array String) : IO Environment := do
   let imports := mods.map fun m => ({ module := m.toName } : Import)
   importModules imports {}
 
-/-- Module names of the environment's direct imports. -/
-@[export lc_env_imports]
-def lcEnvImports (env : Environment) : Array String :=
-  env.imports.map (·.module.toString)
-
-/-- A short, lean4export-flavoured tag for the kind of a constant. -/
-private def constKind : ConstantInfo → String
-  | .axiomInfo _  => "axiom"
-  | .defnInfo _   => "def"
-  | .thmInfo _    => "theorem"
-  | .opaqueInfo _ => "opaque"
-  | .quotInfo _   => "quot"
-  | .inductInfo _ => "inductive"
-  | .ctorInfo _   => "ctor"
-  | .recInfo _    => "rec"
-
-/-- The non-internal constant names of the environment, in `constants` order. -/
-@[export lc_env_const_names]
-def lcEnvConstNames (env : Environment) : Array String := Id.run do
-  let mut out := #[]
-  for (n, _) in env.constants.toList do
-    if !n.isInternal then
-      out := out.push n.toString
-  return out
-
-/-- The constant kinds, parallel (same order/filter) to `lc_env_const_names`. -/
-@[export lc_env_const_kinds]
-def lcEnvConstKinds (env : Environment) : Array String := Id.run do
-  let mut out := #[]
-  for (n, ci) in env.constants.toList do
-    if !n.isInternal then
-      out := out.push (constKind ci)
-  return out
-
 /-! ## Phase 2: constant extraction -/
 
 /-- Every constant in the environment (no filtering: the kernel needs the full
@@ -95,6 +61,21 @@ def lcCiDeps (ci : ConstantInfo) : Array Name := Id.run do
     for r in rv.rules do
       s := s ++ r.rhs.getUsedConstants
   return s
+
+/-- Whether a constant is `unsafe` or `partial` — such declarations are not
+    checked by the kernel (and lean4export likewise omits them). -/
+@[export lc_ci_is_unsafe]
+def lcCiIsUnsafe (ci : ConstantInfo) : UInt8 :=
+  let u := match ci with
+    | .axiomInfo v  => v.isUnsafe
+    | .defnInfo v   => match v.safety with | .safe => false | _ => true
+    | .thmInfo _    => false
+    | .opaqueInfo v => v.isUnsafe
+    | .quotInfo _   => false
+    | .inductInfo v => v.isUnsafe
+    | .ctorInfo v   => v.isUnsafe
+    | .recInfo v    => v.isUnsafe
+  if u then 1 else 0
 
 /-- Discriminant: 0 axiom, 1 def, 2 theorem, 3 opaque, 4 quot, 5 inductive,
     6 constructor, 7 recursor. -/

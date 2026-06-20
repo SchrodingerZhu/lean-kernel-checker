@@ -35,7 +35,7 @@ use num_bigint::BigUint;
 use sokonanoda::builder::{Builder, ConstructorInput, InductiveInput, RecRuleInput, RecursorInput};
 use sokonanoda::env::ReducibilityHint;
 use sokonanoda::expr::BinderStyle;
-use sokonanoda::util::{Config, ExprPtr, LevelPtr, LevelsPtr, NamePtr};
+use sokonanoda::util::{Config, ExportFile, ExprPtr, LevelPtr, LevelsPtr, NamePtr};
 
 use crate::ffi::LeanObj;
 
@@ -45,6 +45,7 @@ type Obj = *mut lean_object;
 unsafe extern "C" {
     fn lc_env_all_consts(env: Obj) -> Obj;
     fn lc_ci_deps(ci: Obj) -> Obj;
+    fn lc_ci_is_unsafe(ci: Obj) -> u8;
     fn lc_ci_kind(ci: Obj) -> u8;
     fn lc_ci_name(ci: Obj) -> Obj;
     fn lc_name_to_string(n: Obj) -> Obj;
@@ -170,10 +171,14 @@ unsafe fn nat_to_u64(o: &LeanObj) -> u64 {
 struct Walker<'b, 'p> {
     b: &'b mut Builder<'p>,
     expr_memo: HashMap<usize, ExprPtr<'p>>,
+    /// The display name of each submitted declaration, for diagnostics.
+    names: HashMap<NamePtr<'p>, String>,
 }
 
 impl<'b, 'p> Walker<'b, 'p> {
-    fn new(b: &'b mut Builder<'p>) -> Self { Walker { b, expr_memo: HashMap::new() } }
+    fn new(b: &'b mut Builder<'p>) -> Self {
+        Walker { b, expr_memo: HashMap::new(), names: HashMap::new() }
+    }
 
     /// `Name`: anonymous = scalar; str = tag 1 (pre, String); num = tag 2 (pre, Nat).
     unsafe fn walk_name(&mut self, o: &LeanObj) -> NamePtr<'p> {
@@ -392,35 +397,111 @@ struct Unit {
     is_block: bool,
 }
 
+/// The outcome of checking an environment.
+pub struct CheckReport {
+    /// Total declarations submitted to the kernel.
+    pub total: usize,
+    /// Declarations the kernel rejected, as `(name, message)`.
+    pub failures: Vec<(String, String)>,
+}
+
+/// Per-thread stack for kernel checking: the conversion checker recurses deeply.
+const CHECK_STACK: usize = 1usize << 31; // 2 GiB
+
 /// Drive the whole pipeline: extract `env`'s constants, order them, build a
-/// sokonanoda environment, and check it. `selected` (if non-empty) restricts to
-/// those constants and their transitive dependencies. Returns the number of
-/// declarations checked.
-pub fn check_environment(env: Obj, selected: &[String], num_threads: usize) -> Result<usize, String> {
+/// sokonanoda environment, and check every declaration. `selected` (if
+/// non-empty) restricts to those constants and their transitive dependencies.
+///
+/// Checking does **not** stop at the first error: each declaration is checked
+/// independently and every failure is collected into the returned report.
+pub fn check_environment(env: Obj, selected: &[String], num_threads: usize) -> CheckReport {
     let config = Config { num_threads, ..Config::default() };
     let mut builder = Builder::new(config);
 
-    let count: usize = unsafe {
+    let (total, names) = unsafe {
         let mut metas = gather_consts(env);
         let units = assign_units(&mut metas);
         let order = topo_order(&metas, &units, selected);
-        emit_units(&mut builder, &metas, &units, &order);
-        order.iter().map(|&u| units[u].members.len()).sum()
+        let mut w = Walker::new(&mut builder);
+        for &u in &order {
+            let unit = &units[u];
+            if unit.is_block {
+                emit_block(&mut w, &metas, unit);
+            } else {
+                emit_singleton(&mut w, &metas[unit.members[0]]);
+            }
+        }
+        let total = order.iter().map(|&u| units[u].members.len()).sum();
+        (total, std::mem::take(&mut w.names))
     };
 
     let export = builder.finish();
-    // `check_all_declars` panics (assert / unwrap) on a kernel rejection; turn
-    // that into an error rather than unwinding out of the FFI boundary.
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export.check_all_declars()))
-        .map(|()| count)
-        .map_err(|e| {
-            let msg = e
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| e.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "kernel rejected a declaration".to_string());
-            format!("kernel check failed: {msg}")
-        })
+    let failures = check_all(&export, &names, num_threads.max(1));
+    CheckReport { total, failures }
+}
+
+/// Check every declaration, collecting failures. Each declaration is checked in
+/// isolation under `catch_unwind` (sokonanoda signals rejection by panicking),
+/// so one bad declaration neither aborts the run nor hides the rest.
+///
+/// Runs on a dedicated rayon pool sized to `num_threads` with large per-thread
+/// stacks (the conversion checker recurses deeply); `par_iter` collects the
+/// failures in declaration order without a shared mutex.
+fn check_all<'p>(
+    export: &ExportFile<'p>,
+    names: &HashMap<NamePtr<'p>, String>,
+    num_threads: usize,
+) -> Vec<(String, String)> {
+    use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
+    use rayon::prelude::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .stack_size(CHECK_STACK)
+        .build()
+        .expect("build checker thread pool");
+
+    // A progress bar on stderr (auto-hidden when stderr is not a terminal).
+    let bar = ProgressBar::new(export.declars.len() as u64);
+    bar.set_style(
+        ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
+            .unwrap()
+            .progress_chars("=>-"),
+    );
+    bar.set_message("checking");
+
+    // Suppress the default panic hook (which would print every rejection to
+    // stderr) for the duration of checking — both to keep the progress bar
+    // clean and because rejections are reported via the returned failures.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+
+    let failures = pool.install(|| {
+        (0..export.declars.len())
+            .into_par_iter()
+            .progress_with(bar.clone())
+            .filter_map(|i| {
+                let (name_ptr, declar) = export.declars.get_index(i).unwrap();
+                catch_unwind(AssertUnwindSafe(|| export.check_declar(declar))).err().map(|e| {
+                    let name = names.get(name_ptr).cloned().unwrap_or_else(|| "<unknown>".to_string());
+                    (name, panic_message(e))
+                })
+            })
+            .collect()
+    });
+
+    std::panic::set_hook(prev_hook);
+    bar.finish_and_clear();
+    failures
+}
+
+/// Extract a human-readable message from a panic payload.
+fn panic_message(e: Box<dyn std::any::Any + Send>) -> String {
+    e.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| e.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "kernel rejected the declaration".to_string())
 }
 
 unsafe fn gather_consts(env: Obj) -> Vec<ConstMeta> {
@@ -429,6 +510,10 @@ unsafe fn gather_consts(env: Obj) -> Vec<ConstMeta> {
         let consts = LeanObj::from_owned(lc_env_all_consts(env));
         array_elems(&consts)
             .into_iter()
+            // Skip `unsafe`/`partial` declarations: the kernel does not check
+            // them, and they reference each other recursively (e.g. the
+            // `*._unsafe_rec` companions) in ways the kernel cannot represent.
+            .filter(|ci| acc_u8(ci, lc_ci_is_unsafe) == 0)
             .map(|ci| {
                 let name = name_string(&acc_obj(&ci, lc_ci_name));
                 let kind = acc_u8(&ci, lc_ci_kind);
@@ -550,25 +635,11 @@ fn topo_order(metas: &[ConstMeta], units: &[Unit], selected: &[String]) -> Vec<u
     order
 }
 
-/// Build each unit's declarations and submit them in dependency order.
-unsafe fn emit_units<'p>(builder: &mut Builder<'p>, metas: &[ConstMeta], units: &[Unit], order: &[usize]) {
-    unsafe {
-        let mut w = Walker::new(builder);
-        for &u in order {
-            let unit = &units[u];
-            if unit.is_block {
-                emit_block(&mut w, metas, unit);
-            } else {
-                emit_singleton(&mut w, &metas[unit.members[0]]);
-            }
-        }
-    }
-}
-
 unsafe fn emit_singleton<'p>(w: &mut Walker<'_, 'p>, m: &ConstMeta) {
     unsafe {
         let ci = &m.obj;
         let name = w.walk_name(&acc_obj(ci, lc_ci_name));
+        w.names.insert(name, m.name.clone());
         let uparams = w.uparams(ci);
         let ty = w.walk_expr(&acc_obj(ci, lc_ci_type));
         match m.kind {
@@ -602,6 +673,7 @@ unsafe fn emit_block<'p>(w: &mut Walker<'_, 'p>, metas: &[ConstMeta], unit: &Uni
             let m = &metas[mi];
             let ci = &m.obj;
             let name = w.walk_name(&acc_obj(ci, lc_ci_name));
+            w.names.insert(name, m.name.clone());
             let uparams = w.uparams(ci);
             let ty = w.walk_expr(&acc_obj(ci, lc_ci_type));
             match m.kind {
